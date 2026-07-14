@@ -110,6 +110,7 @@
         <div class="pbody">
           <div class="ruler" style="border-bottom-color:transparent"></div>
           <canvas id="out"></canvas>
+          <canvas id="gl" style="display:none;cursor:grab"></canvas>
         </div>
       </div>
     </div>
@@ -129,6 +130,9 @@
           <button id="m-relief" aria-pressed="true">Relief</button>
           <button id="m-depth" aria-pressed="false">Depth</button>
           <button id="m-contour" aria-pressed="false">Contour</button>
+          <button id="m-parallax" aria-pressed="false" title="The poster's own pattern floating in depth — what your eyes see when it fuses. Move the mouse over it to peek around.">Fused 3D</button>
+          <button id="m-surface" aria-pressed="false" title="The reconstructed surface as a real 3D model — drag to orbit it.">Model</button>
+          <button id="m-color" aria-pressed="true" title="Applies to Relief &amp; Contour">Photo color</button>
           <button id="save">Save</button>
         </div>
       </div>
@@ -141,7 +145,7 @@
 <script>
 "use strict";
 
-var SRC=null, DEPTH=null, DW=0, DH=0, PERIOD=100, MODE="relief", busy=false;
+var SRC=null, DEPTH=null, SHIFT=null, DW=0, DH=0, PERIOD=100, MODE="relief", COLORSRC=true, busy=false;
 var $=function(id){return document.getElementById(id);};
 var clamp=function(v,a,b){return v<a?a:v>b?b:v;};
 
@@ -223,6 +227,7 @@ function ingest(img){
     catch (secErr){ say("Cannot read the pixels back", "The browser blocked canvas readback for this image.", true, 1); return; }
 
     SRC = { data: id.data, w: w, h: h };
+    COLORMAP = null; stopParallax();
     $("srcmeta").textContent = w + " \u00D7 " + h;
 
     // Show the source straight away, so an upload always *does* something.
@@ -303,6 +308,9 @@ function decode(period, done){
   for (var i = 0; i < dw*h; i++) bestCost[i] = Infinity;
   var bestS = new Int16Array(dw*h);
   var raw = new Float32Array(dw*h);
+  // costs one shift below/above the winner, for sub-pixel refinement
+  var cLo = new Float32Array(dw*h), cHi = new Float32Array(dw*h), prevAgg = null;
+  for (var i2i = 0; i2i < dw*h; i2i++){ cLo[i2i] = Infinity; cHi[i2i] = Infinity; }
   var total = sMax - sMin + 1, s = sMin, k = 0;
 
   function step(){
@@ -317,16 +325,50 @@ function decode(period, done){
       }
       var agg = boxV(boxH(raw, dw, h, 4), dw, h, 3);   // single pixels are ambiguous in noise
       for (var j = 0; j < dw*h; j++){
-        if (agg[j] < bestCost[j]) { bestCost[j] = agg[j]; bestS[j] = s; }
+        var aj = agg[j];
+        if (aj < bestCost[j]){
+          bestCost[j] = aj; bestS[j] = s;
+          cLo[j] = prevAgg ? prevAgg[j] : Infinity;
+          cHi[j] = Infinity;
+        } else if (bestS[j] === s - 1){
+          cHi[j] = aj;      // first plane after the winner
+        }
       }
+      prevAgg = agg;
     }
     say("Measuring pattern spacing", "", false, 0.15 + 0.8 * (k/total));
     if (s <= sMax) { setTimeout(step, 0); return; }
 
+    // Sub-pixel disparity: fit a parabola through the cost at s-1, s, s+1 and
+    // take its vertex. Whole-pixel shifts quantize depth into visible terraces;
+    // this recovers the smooth gradients the poster actually encodes.
     var depth = new Float32Array(dw*h);
     var span = Math.max(1, period - sMin);
-    for (var m = 0; m < dw*h; m++) depth[m] = clamp((period - bestS[m]) / span, 0, 1);
-    DEPTH = depth; DW = dw; DH = h;
+    for (var m = 0; m < dw*h; m++){
+      var c0 = bestCost[m], cm = cLo[m], cp = cHi[m], dlt = 0;
+      if (cm < Infinity && cp < Infinity){
+        var den = cm - 2*c0 + cp;
+        if (den > 1e-6) dlt = clamp(0.5*(cm - cp)/den, -0.5, 0.5);
+      }
+      depth[m] = clamp((period - (bestS[m] + dlt)) / span, 0, 1);
+    }
+
+    // Posters rarely use the whole theoretical disparity range — stretch to the
+    // band this image actually occupies so the shape has contrast. Percentiles are
+    // taken on a median-filtered copy: lone mismatch speckles must not set the range.
+    var n = dw*h, histo = new Int32Array(257), acc = 0, lo = -1, hi = 1;
+    var clean = median3(depth, dw, h);
+    for (var m2 = 0; m2 < n; m2++) histo[(clean[m2]*256)|0]++;
+    for (var bb = 0; bb <= 256; bb++){
+      acc += histo[bb];
+      if (lo < 0 && acc >= n*0.01) lo = bb/256;
+      if (acc >= n*0.99){ hi = (bb+1)/256; break; }
+    }
+    if (hi - lo > 0.04){
+      var inv = 1/(hi - lo);
+      for (var m3 = 0; m3 < n; m3++) depth[m3] = clamp((depth[m3] - lo)*inv, 0, 1);
+    }
+    DEPTH = depth; SHIFT = bestS; DW = dw; DH = h;
     done();
   }
   setTimeout(step, 0);
@@ -361,8 +403,270 @@ function ramp(t){
   return [a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f];
 }
 
+// The left sample of every matched pair sits at the same (x,y) the decoder
+// walked from — but the raw pixel there is one random dot of the wallpaper,
+// which is pure noise. The region's *average* over one pattern period is the
+// color your eye actually perceives, so blur the photo at period scale and
+// tap that instead. Averaging noise desaturates, so push chroma back up.
+var COLORMAP = null;
+function buildColorMap(){
+  var w = SRC.w, h = SRC.h, d = SRC.data, n = w*h;
+  var ch = [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
+  for (var i = 0; i < n; i++){
+    ch[0][i] = d[i*4]; ch[1][i] = d[i*4+1]; ch[2][i] = d[i*4+2];
+  }
+  var rad = Math.max(4, Math.round(PERIOD * 0.55));
+  for (var c = 0; c < 3; c++){
+    ch[c] = boxV(boxH(ch[c], w, h, rad), w, h, rad);
+    ch[c] = boxV(boxH(ch[c], w, h, rad >> 1), w, h, rad >> 1);
+  }
+  COLORMAP = { r: ch[0], g: ch[1], b: ch[2], period: PERIOD };
+}
+function samplePhoto(x, y){
+  if (!COLORMAP || COLORMAP.period !== PERIOD) buildColorMap();
+  var i = y * SRC.w + x;
+  var r = COLORMAP.r[i], g = COLORMAP.g[i], b = COLORMAP.b[i];
+  var l = (r + g + b) / 3, k = 1.45;
+  return [clamp(l+(r-l)*k, 0, 255), clamp(l+(g-l)*k, 0, 255), clamp(l+(b-l)*k, 0, 255)];
+}
+
+// The fused view: what a viewer actually perceives when the poster snaps in —
+// the wallpaper texture itself, floating in depth. A screen can't do stereopsis,
+// so we use its motion cousin: sway the eyepoint and let near points slide
+// further than far ones, sampling the source at x + sway * depth.
+var PAR = null;
+function stopParallax(){
+  if (PAR){ cancelAnimationFrame(PAR.raf); PAR = null; }
+}
+function startParallax(){
+  stopParallax();
+  var d = polish(DEPTH, DW, DH, +$("smooth").value);
+  var lit = new Float32Array(DW*DH);   // gentle relief so a still frame still reads
+  var fogK = new Float32Array(DW*DH);  // aerial perspective: the far plane recedes
+  var edge = new Float32Array(DW*DH);  // half-occlusion zones: strips only one eye
+  var phase = new Float32Array(DW*DH); // can see, which shimmer in real viewing
+  for (var y = 0; y < DH; y++){        // into the page so the shape separates from
+    for (var x = 0; x < DW; x++){      // the identical wallpaper behind it
+      var i = y*DW + x;
+      var zx = d[clamp(x+1,0,DW-1) + y*DW] - d[clamp(x-1,0,DW-1) + y*DW];
+      var zy = d[x + clamp(y+1,0,DH-1)*DW] - d[x + clamp(y-1,0,DH-1)*DW];
+      var nx = -zx*26, ny = -zy*26, nz = 1;
+      var len = Math.sqrt(nx*nx + ny*ny + nz*nz);
+      lit[i] = 0.62 + 0.55 * clamp((nx*(-0.42) + ny*(-0.60) + nz*0.68) / len, 0, 1);
+      fogK[i] = 0.55 * (1 - d[i]);
+      var gz = Math.abs(zx);   // only true depth cliffs shimmer, not surface noise
+      edge[i] = gz > 0.05 ? Math.min(1, (gz - 0.05) * 10) : 0;
+      phase[i] = Math.random() * 6.283;
+    }
+  }
+  var cv = $("out"); cv.width = DW; cv.height = DH;
+  var ctx = cv.getContext("2d");
+  var img = ctx.createImageData(DW, DH), px = img.data;
+  var A = Math.max(5, PERIOD * 0.15);
+  var reduced = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  PAR = { raf: 0, mouse: null, lastE: null };
+  var t0 = performance.now();
+  function frame(now){
+    if (!PAR || MODE !== "parallax") return;
+    var e = PAR.mouse !== null ? PAR.mouse * A
+          : reduced             ? A * 0.6
+          :                       Math.sin((now - t0) / 650) * A;
+    // shimmer animates even at a fixed eyepoint, so render every frame —
+    // except under reduced motion, where a still eyepoint means a still image
+    if (!(reduced && e === PAR.lastE)){
+      PAR.lastE = e;
+      var sd = SRC.data, w = SRC.w, sh = SHIFT;
+      var tw = reduced ? 0.6 : 0;
+      for (var y2 = 0; y2 < DH; y2++){
+        var rs = y2*w, rd = y2*DW;
+        for (var x2 = 0; x2 < DW; x2++){
+          var i2 = rd + x2, fx = x2 + e * d[i2];
+          if (fx < 0) fx = 0; else if (fx > w - 2) fx = w - 2;
+          var x0 = fx | 0, f = fx - x0, a = (rs + x0)*4, o = i2*4;
+          // binocular fusion: the percept is both eyes' matched samples combined
+          var bx = fx + sh[i2];
+          if (bx > w - 2) bx = w - 2;
+          var bx0 = bx | 0, bf = bx - bx0, ba = (rs + bx0)*4;
+          var F = fogK[i2], L = 0.5 * lit[i2] * (1 - F);
+          var R = ((sd[a]   + (sd[a+4] - sd[a])  *f) + (sd[ba]   + (sd[ba+4] - sd[ba])  *bf)) * L + 11*F;
+          var G = ((sd[a+1] + (sd[a+5] - sd[a+1])*f) + (sd[ba+1] + (sd[ba+5] - sd[ba+1])*bf)) * L + 17*F;
+          var B = ((sd[a+2] + (sd[a+6] - sd[a+2])*f) + (sd[ba+2] + (sd[ba+6] - sd[ba+2])*bf)) * L + 25*F;
+          var Ei = edge[i2];
+          if (Ei > 0.03){  // half-occlusion lace at the silhouette
+            var k = Ei * (0.5 + 0.5 * (reduced ? tw : Math.sin(now*0.006 + phase[i2]))) * 0.5;
+            R += (233 - R)*k; G += (229 - G)*k; B += (219 - B)*k;
+          }
+          px[o] = R; px[o+1] = G; px[o+2] = B; px[o+3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+    }
+    PAR.raf = requestAnimationFrame(frame);
+  }
+  PAR.raf = requestAnimationFrame(frame);
+}
+$("out").addEventListener("pointermove", function(ev){
+  if (!PAR) return;
+  var r = this.getBoundingClientRect();
+  PAR.mouse = clamp((ev.clientX - r.left) / r.width * 2 - 1, -1, 1);
+});
+$("out").addEventListener("pointerleave", function(){ if (PAR) PAR.mouse = null; });
+
+// The reconstructed scene as an actual 3D model: a height-field mesh you can
+// orbit, colored by the poster's own local pattern color, lit dynamically.
+var SURF = null;
+function stopSurface(){
+  if (SURF && SURF.raf){ cancelAnimationFrame(SURF.raf); SURF.raf = 0; }
+}
+function mul4(a, b){          // column-major 4x4
+  var o = new Float32Array(16);
+  for (var c = 0; c < 4; c++)
+    for (var r = 0; r < 4; r++)
+      o[c*4+r] = a[r]*b[c*4] + a[4+r]*b[c*4+1] + a[8+r]*b[c*4+2] + a[12+r]*b[c*4+3];
+  return o;
+}
+function surfaceGL(){
+  var cv = $("gl");
+  if (SURF && SURF.gl && !SURF.gl.isContextLost()) return SURF.gl;
+  return cv.getContext("webgl", {antialias: true, preserveDrawingBuffer: true});
+}
+function startSurface(){
+  stopSurface();
+  var cv = $("gl");
+  cv.width = DW; cv.height = DH;
+  var gl = surfaceGL();
+  if (!gl){ say("This browser has no WebGL for the Model view", "", true, 1); return; }
+
+  if (!SURF || SURF.gl !== gl){
+    var vs = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vs,
+      "attribute vec3 aP; attribute vec3 aN; attribute vec3 aC;" +
+      "uniform mat4 uM; uniform mat4 uR; varying vec3 vC;" +
+      "void main(){" +
+      "  gl_Position = uM * vec4(aP, 1.0);" +
+      "  vec3 n = normalize((uR * vec4(aN, 0.0)).xyz);" +
+      "  float l = max(dot(n, normalize(vec3(-0.35, 0.55, 0.85))), 0.0);" +
+      "  vC = aC * (0.28 + 0.92 * l);" +
+      "}");
+    gl.compileShader(vs);
+    var fs = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fs,
+      "precision mediump float; varying vec3 vC;" +
+      "void main(){ gl_FragColor = vec4(vC, 1.0); }");
+    gl.compileShader(fs);
+    var pr = gl.createProgram();
+    gl.attachShader(pr, vs); gl.attachShader(pr, fs); gl.linkProgram(pr);
+    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)){
+      say("Could not build the 3D shader", gl.getProgramInfoLog(pr) || "", true, 1); return;
+    }
+    SURF = { gl: gl, pr: pr, raf: 0, yaw: 0, pitch: 0.45, drag: null,
+             vb: gl.createBuffer(), ib: gl.createBuffer(), nTri: 0 };
+  }
+
+  // ---- mesh from the polished depth field
+  var d = polish(DEPTH, DW, DH, +$("smooth").value);
+  var GW = Math.min(200, DW);
+  var GH = Math.max(2, Math.min(Math.round(GW * DH / DW), Math.floor(64000 / GW)));
+  var aspect = DH / DW, ZS = 0.55;
+  var z = new Float32Array(GW*GH);
+  for (var gy = 0; gy < GH; gy++){
+    var sy = Math.round(gy * (DH-1) / (GH-1));
+    for (var gx = 0; gx < GW; gx++){
+      var sx = Math.round(gx * (DW-1) / (GW-1));
+      z[gy*GW+gx] = d[sy*DW + sx];
+    }
+  }
+  var stepX = 2 / (GW-1), stepY = 2*aspect / (GH-1);
+  var vtx = new Float32Array(GW*GH*9);
+  for (var gy2 = 0; gy2 < GH; gy2++){
+    var sy2 = Math.round(gy2 * (DH-1) / (GH-1));
+    for (var gx2 = 0; gx2 < GW; gx2++){
+      var gi = gy2*GW + gx2, o = gi*9;
+      var zz = z[gi];
+      vtx[o]   = gx2*stepX - 1;
+      vtx[o+1] = aspect - gy2*stepY;
+      vtx[o+2] = zz*ZS;
+      var zl = z[gy2*GW + Math.max(0, gx2-1)], zr = z[gy2*GW + Math.min(GW-1, gx2+1)];
+      var zu = z[Math.max(0, gy2-1)*GW + gx2], zdn = z[Math.min(GH-1, gy2+1)*GW + gx2];
+      var nx = -(zr - zl)*ZS/(2*stepX), ny = (zdn - zu)*ZS/(2*stepY), nz = 1;
+      var nl = Math.sqrt(nx*nx + ny*ny + nz*nz);
+      vtx[o+3] = nx/nl; vtx[o+4] = ny/nl; vtx[o+5] = nz/nl;
+      var sx2 = Math.round(gx2 * (DW-1) / (GW-1));
+      var c = COLORSRC ? samplePhoto(sx2, sy2) : ramp(0.30 + 0.55*zz);
+      vtx[o+6] = c[0]/255; vtx[o+7] = c[1]/255; vtx[o+8] = c[2]/255;
+    }
+  }
+  var idx = new Uint16Array((GW-1)*(GH-1)*6), q = 0;
+  for (var iy = 0; iy < GH-1; iy++){
+    for (var ix = 0; ix < GW-1; ix++){
+      var a0 = iy*GW + ix, b0 = a0 + GW;
+      idx[q++] = a0; idx[q++] = b0;   idx[q++] = a0+1;
+      idx[q++] = a0+1; idx[q++] = b0; idx[q++] = b0+1;
+    }
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, SURF.vb);
+  gl.bufferData(gl.ARRAY_BUFFER, vtx, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, SURF.ib);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+  SURF.nTri = q;
+
+  var pr2 = SURF.pr;
+  gl.useProgram(pr2);
+  var locP = gl.getAttribLocation(pr2, "aP"), locN = gl.getAttribLocation(pr2, "aN"), locC = gl.getAttribLocation(pr2, "aC");
+  gl.enableVertexAttribArray(locP); gl.enableVertexAttribArray(locN); gl.enableVertexAttribArray(locC);
+  gl.vertexAttribPointer(locP, 3, gl.FLOAT, false, 36, 0);
+  gl.vertexAttribPointer(locN, 3, gl.FLOAT, false, 36, 12);
+  gl.vertexAttribPointer(locC, 3, gl.FLOAT, false, 36, 24);
+  var locM = gl.getUniformLocation(pr2, "uM"), locR = gl.getUniformLocation(pr2, "uR");
+  gl.enable(gl.DEPTH_TEST);
+  gl.viewport(0, 0, cv.width, cv.height);
+  gl.clearColor(11/255, 17/255, 25/255, 1);
+
+  var reduced = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var t0 = performance.now();
+  function draw(now){
+    if (!SURF || MODE !== "surface") return;
+    var yaw = SURF.yaw + (SURF.drag || reduced ? 0 : 0.30 * Math.sin((now - t0) / 2400));
+    var cy = Math.cos(yaw), sy3 = Math.sin(yaw), cx = Math.cos(SURF.pitch), sx3 = Math.sin(SURF.pitch);
+    var rotY = new Float32Array([cy,0,-sy3,0,  0,1,0,0,  sy3,0,cy,0,  0,0,0,1]);
+    var rotX = new Float32Array([1,0,0,0,  0,cx,sx3,0,  0,-sx3,cx,0,  0,0,0,1]);
+    var R = mul4(rotX, rotY);
+    var f = 1 / Math.tan(0.42), asp2 = cv.width / cv.height, nr = 0.1, fr2 = 10;
+    var P = new Float32Array([f/asp2,0,0,0,  0,f,0,0,  0,0,(fr2+nr)/(nr-fr2),-1,  0,0,2*fr2*nr/(nr-fr2),0]);
+    var T = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,-0.05,-2.3,1]);
+    gl.uniformMatrix4fv(locM, false, mul4(P, mul4(T, R)));
+    gl.uniformMatrix4fv(locR, false, R);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.drawElements(gl.TRIANGLES, SURF.nTri, gl.UNSIGNED_SHORT, 0);
+    SURF.raf = requestAnimationFrame(draw);
+  }
+  SURF.raf = requestAnimationFrame(draw);
+}
+$("gl").addEventListener("pointerdown", function(ev){
+  if (!SURF) return;
+  SURF.drag = { x: ev.clientX, y: ev.clientY, yaw: SURF.yaw, pitch: SURF.pitch };
+  this.setPointerCapture(ev.pointerId);
+  this.style.cursor = "grabbing";
+});
+$("gl").addEventListener("pointermove", function(ev){
+  if (!SURF || !SURF.drag) return;
+  SURF.yaw = SURF.drag.yaw + (ev.clientX - SURF.drag.x) * 0.008;
+  SURF.pitch = clamp(SURF.drag.pitch + (ev.clientY - SURF.drag.y) * 0.006, -0.4, 1.25);
+});
+$("gl").addEventListener("pointerup", function(){
+  if (SURF) SURF.drag = null;
+  this.style.cursor = "grab";
+});
+
 function paint(){
   if (!DEPTH) return;
+  var isSurf = MODE === "surface";
+  $("gl").style.display = isSurf ? "block" : "none";
+  $("out").style.display = isSurf ? "none" : "block";
+  if (isSurf){ stopParallax(); startSurface(); return; }
+  stopSurface();
+  if (MODE === "parallax"){ startParallax(); return; }
+  stopParallax();
   var d = polish(DEPTH, DW, DH, +$("smooth").value);
   var cv = $("out"); cv.width = DW; cv.height = DH;
   var ctx = cv.getContext("2d");
@@ -378,7 +682,7 @@ function paint(){
         var bands = 9, band = Math.floor(z * bands);
         var edge = (x < DW-1 && Math.floor(d[i+1]*bands) !== band) ||
                    (y < DH-1 && Math.floor(d[i+DW]*bands) !== band);
-        c = ramp(band / (bands-1));
+        c = COLORSRC ? samplePhoto(x, y) : ramp(band / (bands-1));
         var kk = edge ? 1 : 0.16;
         r = 14 + (c[0]-14)*kk; g = 21 + (c[1]-21)*kk; b = 30 + (c[2]-30)*kk;
       } else {
@@ -388,8 +692,12 @@ function paint(){
         var len = Math.sqrt(nx*nx + ny*ny + nz*nz); nx/=len; ny/=len; nz/=len;
         var lum = clamp(nx*(-0.42) + ny*(-0.60) + nz*0.68, 0, 1);
         var lit = 0.20 + 0.95*lum;
-        c = ramp(0.30 + 0.55*z);
+        c = COLORSRC ? samplePhoto(x, y) : ramp(0.30 + 0.55*z);
         r = clamp(c[0]*lit,0,255); g = clamp(c[1]*lit,0,255); b = clamp(c[2]*lit,0,255);
+        if (COLORSRC){ // photo tint is flat in depth, so let the far plane recede
+          var fog = 0.50 * (1 - z);
+          r += (11 - r)*fog; g += (17 - g)*fog; b += (25 - b)*fog;
+        }
       }
       px[o]=r; px[o+1]=g; px[o+2]=b; px[o+3]=255;
     }
@@ -453,17 +761,22 @@ $("period").addEventListener("input", function(e){ $("pv").textContent = e.targe
 $("period").addEventListener("change", function(e){ PERIOD = +e.target.value; run(false); });
 $("smooth").addEventListener("input", function(e){ $("sv").textContent = e.target.value; paint(); });
 
-["relief","depth","contour"].forEach(function(m){
+["relief","depth","contour","parallax","surface"].forEach(function(m){
   $("m-"+m).onclick = function(){
     MODE = m;
-    ["relief","depth","contour"].forEach(function(k){ $("m-"+k).setAttribute("aria-pressed", String(k===m)); });
+    ["relief","depth","contour","parallax","surface"].forEach(function(k){ $("m-"+k).setAttribute("aria-pressed", String(k===m)); });
     paint();
   };
 });
+$("m-color").onclick = function(){
+  COLORSRC = !COLORSRC;
+  $("m-color").setAttribute("aria-pressed", String(COLORSRC));
+  paint();
+};
 $("save").onclick = function(){
   var a = document.createElement("a");
   a.download = "revealed-" + MODE + ".png";
-  a.href = $("out").toDataURL("image/png");
+  a.href = (MODE === "surface" ? $("gl") : $("out")).toDataURL("image/png");
   a.click();
 };
 
@@ -472,27 +785,38 @@ $("sample").onclick = function(){
   say("Building a test stereogram", "", false, 0.05);
   setTimeout(function(){
     var w = 780, h = 460;
-    var depth = new Float32Array(w*h);
-    var cx = w*0.5, cy = h*0.40, R = Math.min(w,h)*0.30;
-    for (var y = 0; y < h; y++) for (var x = 0; x < w; x++){
-      var dx = (x-cx)/R, dy = (y-cy)/R, r2 = dx*dx + dy*dy;
-      if (r2 < 1) depth[y*w+x] = Math.sqrt(1-r2) * 0.92;
-    }
+
+    // hidden surface: a shark, like the classic poster
     var t = document.createElement("canvas"); t.width = w; t.height = h;
     var tc = t.getContext("2d", {willReadFrequently:true});
     tc.fillStyle = "#000"; tc.fillRect(0,0,w,h);
     tc.fillStyle = "#fff";
-    tc.font = "700 76px 'Space Grotesk', sans-serif";
-    tc.textAlign = "center"; tc.textBaseline = "middle";
-    tc.fillText("3D", cx, h*0.86);
+    tc.beginPath(); tc.ellipse(w*0.44, h*0.54, w*0.26, h*0.14, 0, 0, Math.PI*2); tc.fill();
+    tc.beginPath(); tc.moveTo(w*0.68, h*0.54); tc.lineTo(w*0.84, h*0.34);
+    tc.lineTo(w*0.81, h*0.54); tc.lineTo(w*0.84, h*0.72); tc.closePath(); tc.fill();
+    tc.beginPath(); tc.moveTo(w*0.36, h*0.44); tc.lineTo(w*0.44, h*0.20);
+    tc.lineTo(w*0.52, h*0.46); tc.closePath(); tc.fill();
+    tc.beginPath(); tc.moveTo(w*0.38, h*0.64); tc.lineTo(w*0.31, h*0.82);
+    tc.lineTo(w*0.48, h*0.67); tc.closePath(); tc.fill();
     var td = tc.getImageData(0,0,w,h).data;
-    for (var i = 0; i < w*h; i++) if (td[i*4] > 128) depth[i] = Math.max(depth[i], 0.55);
+    var depth = new Float32Array(w*h);
+    for (var i = 0; i < w*h; i++) depth[i] = td[i*4] > 128 ? 0.80 : 0;
+    depth = boxV(boxH(depth, w, h, 6), w, h, 6);   // soften edges into a volume
+    depth = boxV(boxH(depth, w, h, 4), w, h, 4);
+
+    // wallpaper: blue mottled "water", like a printed Magic Eye poster
+    function tex(x, y){
+      var v = Math.sin(x*0.055 + Math.sin(y*0.045)*3.1)
+            + Math.sin((x*0.5 + y)*0.052 + Math.sin(x*0.031)*2.2)
+            + Math.sin(y*0.083 + Math.sin((x - y)*0.021)*2.6);
+      v = clamp(v/6 + 0.5 + (Math.random() - 0.5)*0.55, 0, 1);
+      return [46 + 159*v, 124 + 114*v, 183 + 65*v];
+    }
 
     var E = 112, mu = 0.30;
     var out = document.createElement("canvas"); out.width = w; out.height = h;
     var octx = out.getContext("2d", {willReadFrequently:true});
     var img = octx.createImageData(w, h), px = img.data;
-    var palette = [[233,229,219],[232,163,61],[79,184,201],[22,31,43]];
     var same = new Int32Array(w);
 
     for (var y2 = 0; y2 < h; y2++){
@@ -522,7 +846,7 @@ $("sample").onclick = function(){
       for (var x5 = w-1; x5 >= 0; x5--){
         var o = (y2*w+x5)*4;
         if (same[x5] === x5){
-          var cc = palette[(Math.random()*palette.length)|0];
+          var cc = tex(x5, y2);
           px[o]=cc[0]; px[o+1]=cc[1]; px[o+2]=cc[2];
         } else {
           var sp = (y2*w + same[x5])*4;
@@ -533,6 +857,7 @@ $("sample").onclick = function(){
     }
     octx.putImageData(img, 0, 0);
     SRC = { data: octx.getImageData(0,0,w,h).data, w: w, h: h };
+    COLORMAP = null; stopParallax();
     $("srcmeta").textContent = w + " \u00D7 " + h + " \u00B7 generated";
     $("results").classList.add("on");
     paintSource(false);
