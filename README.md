@@ -42,6 +42,13 @@ Validated against a synthetic stereogram with a known depth map: the period lock
 - Wiggle stereograms, anaglyphs, and cross-eye stereo *pairs* are different formats and are not handled. This is for single-image autostereograms only.
 - Very low-contrast or heavily JPEG-compressed sources give noisier depth maps.
 
+## Sample images
+
+The bundled sample stereograms in `samples/` come from Wikimedia Commons and keep their original licences:
+
+- [Random-dot shark](https://commons.wikimedia.org/wiki/File:Stereogram_Tut_Random_Dot_Shark.png) and [textured shark](https://commons.wikimedia.org/wiki/File:Stereogram_Tut_Shark.png) by Fred Hsu — CC BY-SA 3.0
+- [Sphere, cube and triangle](https://commons.wikimedia.org/wiki/File:Sphere_Cube_Triangle_3D_Stereogram_Illusion.png) by Gary W. Priester (eyeTricks 3D Stereograms) — CC BY-SA 4.0 (resized and recompressed here)
+
 ## Prior art
 
 The generator used for the test image is the classic algorithm from Thimbleby, Inglis and Witten, *Displaying 3D Images: Algorithms for Single Image Random Dot Stereograms* (IEEE Computer, 1994). Recovering shape from a finished autostereogram has been studied properly by Ron Kimmel in *3D Shape Reconstruction from Autostereograms and Stereo* (Journal of Visual Communication and Image Representation, 2002); this implementation is a plain winner-take-all version of the same idea.
