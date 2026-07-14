@@ -6,6 +6,8 @@ Built for the roughly 5–10% of people who have reduced or absent binocular ste
 
 No build step, no dependencies, no server. Open `index.html` and it runs.
 
+**[Try it live →](https://magic-eye-steel.vercel.app/)**
+
 ![A camouflage-pattern autostereogram on the left; on the right, the airplane hidden inside it, recovered as an orbitable 3D model](screenshots/model-view.jpg)
 
 *An off-the-shelf Magic Eye image (left) and the airplane it hides, recovered and rendered as a real 3D model you can drag to orbit (right).*
