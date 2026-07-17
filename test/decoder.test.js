@@ -90,3 +90,26 @@ test("detectPeriod reports low confidence on pure noise", () => {
   const { confidence } = detectPeriod(data, w, h);
   assert.ok(confidence < 0.2, `got confidence ${confidence}`);
 });
+
+import { decodeDepth } from "../decoder.js";
+
+test("decodeDepth returns null when the period is too wide for the image", () => {
+  const w = 60, h = 10;
+  const data = new Uint8ClampedArray(w * h * 4).fill(255);
+  assert.equal(decodeDepth(data, w, h, 100), null);
+});
+
+test("decodeDepth on a flat tiled stereogram yields a near-uniform depth", () => {
+  // Reuse tiledRGBA from the detectPeriod tests (every column equals column x-period).
+  const w = 400, h = 40, period = 60;
+  const data = tiledRGBA(w, h, period);
+  const res = decodeDepth(data, w, h, period);
+  assert.ok(res, "expected a result object");
+  const sMax = Math.max(Math.round(period * 0.70) + 2, Math.round(period * 1.05));
+  assert.equal(res.dw, w - sMax);
+  assert.equal(res.dh, h);
+  // Flat scene -> disparity is constant -> depth has almost no spread.
+  let min = Infinity, max = -Infinity;
+  for (const v of res.depth) { if (v < min) min = v; if (v > max) max = v; }
+  assert.ok(max - min < 0.15, `depth spread ${max - min} too large for a flat scene`);
+});
