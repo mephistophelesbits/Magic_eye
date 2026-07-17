@@ -32,3 +32,22 @@ test("boxV radius 1 averages vertical neighbours with edge clamp", () => {
   assert.ok(Math.abs(out[1] - 1) < 1e-6);
   assert.ok(Math.abs(out[2] - 1) < 1e-6);
 });
+
+import { median3, polish } from "../decoder.js";
+
+test("median3 removes a lone speckle", () => {
+  // 3x3 field of 0 with a single 1 in the centre -> median is 0 everywhere
+  const w = 3, h = 3;
+  const src = new Float32Array(w * h);
+  src[4] = 1;
+  const out = median3(src, w, h);
+  assert.equal(out[4], 0);
+});
+
+test("polish returns same dimensions and stays in range", () => {
+  const w = 8, h = 8;
+  const src = new Float32Array(w * h).map((_, i) => (i % 2));
+  const out = polish(src, w, h, 2);
+  assert.equal(out.length, w * h);
+  for (const v of out) assert.ok(v >= 0 && v <= 1);
+});
