@@ -37,6 +37,7 @@ export function CameraSource() {
     stop() {
       if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
       stream = null;
+      video.srcObject = null;
     },
     grab() {
       if (video.readyState < 2) return null;

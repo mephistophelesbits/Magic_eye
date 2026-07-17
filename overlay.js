@@ -12,7 +12,6 @@ export function OverlayRenderer(canvas) {
 
   return {
     setOpacity(v) { opacity = v; },
-    clearOverlay() { /* next draw with null depth shows raw video */ },
     draw(frame, depth, dw, dh) {
       if (canvas.width !== frame.width) canvas.width = frame.width;
       if (canvas.height !== frame.height) canvas.height = frame.height;

@@ -36,6 +36,10 @@ import { OverlayRenderer } from "./overlay.js";
 var canvas = document.getElementById("view");
 var overlay = OverlayRenderer(canvas);
 var worker = new Worker("./worker.js", { type: "module" });
+worker.onerror = function (err) {
+  decodeInFlight = false;
+  document.getElementById("readout").textContent = "decode worker error:\n" + (err && err.message || err);
+};
 
 var source = null, usingTest = false, running = false;
 var frameId = 0, decodeInFlight = false, decodeCount = 0;
@@ -80,6 +84,7 @@ async function startWith(src, isTest) {
   if (source) source.stop();
   running = false;
   source = src; usingTest = isTest;
+  last = { depth: null, dw: 0, dh: 0 };
   try {
     await source.start();
     running = true;

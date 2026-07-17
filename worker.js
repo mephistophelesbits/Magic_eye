@@ -3,20 +3,21 @@ import { detectPeriod, decodeDepth } from "./decoder.js";
 
 var CONF_MIN = 0.12;   // below this we assume "not a stereogram" and skip
 var lastPeriod = 100;
+var lastConfidence = 0;
 
 self.onmessage = function (e) {
   var msg = e.data;
   var data = new Uint8ClampedArray(msg.buffer); // transferred copy of the frame
   var w = msg.w, h = msg.h, frameId = msg.frameId;
 
-  var confidence = null;
   if (msg.redetect) {
     var dp = detectPeriod(data, w, h);
-    confidence = dp.confidence;
+    lastConfidence = dp.confidence;
     if (dp.confidence >= CONF_MIN) lastPeriod = dp.period;
   }
 
-  if (confidence !== null && confidence < CONF_MIN) {
+  var confidence = lastConfidence;
+  if (confidence < CONF_MIN) {
     self.postMessage({ type: "result", frameId: frameId, period: lastPeriod, confidence: confidence, depth: null });
     return;
   }
