@@ -51,3 +51,42 @@ test("polish returns same dimensions and stays in range", () => {
   assert.equal(out.length, w * h);
   for (const v of out) assert.ok(v >= 0 && v <= 1);
 });
+
+import { detectPeriod } from "../decoder.js";
+
+// Build an RGBA buffer, height 20, whose every row is random dots tiled at `period`.
+function tiledRGBA(w, h, period, seed = 1) {
+  let s = seed;
+  const rand = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const base = new Uint8ClampedArray(period).map(() => (rand() * 255) | 0);
+    for (let x = 0; x < w; x++) {
+      const v = base[x % period];
+      const o = (y * w + x) * 4;
+      data[o] = data[o + 1] = data[o + 2] = v; data[o + 3] = 255;
+    }
+  }
+  return data;
+}
+
+test("detectPeriod finds a tiled period with high confidence", () => {
+  const w = 300, h = 20, period = 40;
+  const data = tiledRGBA(w, h, period);
+  const { period: p, confidence } = detectPeriod(data, w, h);
+  assert.ok(Math.abs(p - period) <= 1, `got period ${p}`);
+  assert.ok(confidence > 0.5, `got confidence ${confidence}`);
+});
+
+test("detectPeriod reports low confidence on pure noise", () => {
+  const w = 300, h = 20;
+  let s = 7;
+  const rand = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    const v = (rand() * 255) | 0, o = i * 4;
+    data[o] = data[o + 1] = data[o + 2] = v; data[o + 3] = 255;
+  }
+  const { confidence } = detectPeriod(data, w, h);
+  assert.ok(confidence < 0.2, `got confidence ${confidence}`);
+});
