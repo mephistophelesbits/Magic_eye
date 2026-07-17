@@ -131,6 +131,31 @@ export function decodeDepth(data, w, h, period) {
   return { depth: depth, shift: bestS, dw: dw, dh: h };
 }
 
+var RAMP = [[79, 184, 201], [233, 229, 219], [232, 163, 61]];
+function ramp(t) {
+  var i = t < 0.5 ? 0 : 1, f = t < 0.5 ? t * 2 : (t - 0.5) * 2;
+  var a = RAMP[i], b = RAMP[i + 1];
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+}
+
+export function colorizeRelief(d, w, h) {
+  var px = new Uint8ClampedArray(w * h * 4);
+  for (var y = 0; y < h; y++) {
+    for (var x = 0; x < w; x++) {
+      var i = y * w + x, o = i * 4, z = d[i];
+      var zx = d[clamp(x + 1, 0, w - 1) + y * w] - d[clamp(x - 1, 0, w - 1) + y * w];
+      var zy = d[x + clamp(y + 1, 0, h - 1) * w] - d[x + clamp(y - 1, 0, h - 1) * w];
+      var nx = -zx * 26, ny = -zy * 26, nz = 1;
+      var len = Math.sqrt(nx * nx + ny * ny + nz * nz); nx /= len; ny /= len; nz /= len;
+      var lum = clamp(nx * (-0.42) + ny * (-0.60) + nz * 0.68, 0, 1);
+      var lit = 0.20 + 0.95 * lum;
+      var c = ramp(0.30 + 0.55 * z);
+      px[o] = c[0] * lit; px[o + 1] = c[1] * lit; px[o + 2] = c[2] * lit; px[o + 3] = 255;
+    }
+  }
+  return px;
+}
+
 export function boxV(buf, w, h, r) {
   var out = new Float32Array(w * h), inv = 1 / (2 * r + 1);
   for (var x = 0; x < w; x++) {

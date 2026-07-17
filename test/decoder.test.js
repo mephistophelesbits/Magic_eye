@@ -113,3 +113,20 @@ test("decodeDepth on a flat tiled stereogram yields a near-uniform depth", () =>
   for (const v of res.depth) { if (v < min) min = v; if (v > max) max = v; }
   assert.ok(max - min < 0.15, `depth spread ${max - min} too large for a flat scene`);
 });
+
+import { colorizeRelief } from "../decoder.js";
+
+test("colorizeRelief returns opaque RGBA and paints near warmer than far", () => {
+  const w = 20, h = 4;
+  const depth = new Float32Array(w * h);
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) depth[y * w + x] = x / (w - 1); // ramp 0..1 left->right
+
+  const px = colorizeRelief(depth, w, h);
+  assert.equal(px.length, w * h * 4);
+  for (let i = 0; i < w * h; i++) assert.equal(px[i * 4 + 3], 255); // opaque
+
+  const rFar = px[(2 * w + 1) * 4];         // near left edge, depth ~0 (cool)
+  const rNear = px[(2 * w + (w - 2)) * 4];  // near right edge, depth ~1 (warm)
+  assert.ok(rNear > rFar, `expected near (${rNear}) warmer than far (${rFar})`);
+});
