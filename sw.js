@@ -11,5 +11,15 @@ self.addEventListener("activate", function (e) {
   }));
 });
 self.addEventListener("fetch", function (e) {
-  e.respondWith(caches.match(e.request).then(function (r) { return r || fetch(e.request); }));
+  if (e.request.method !== "GET") return;
+  e.respondWith(
+    fetch(e.request)
+      .then(function (res) {
+        // Refresh the cached copy so the next offline load is current.
+        var copy = res.clone();
+        caches.open(CACHE).then(function (c) { c.put(e.request, copy); });
+        return res;
+      })
+      .catch(function () { return caches.match(e.request); })
+  );
 });

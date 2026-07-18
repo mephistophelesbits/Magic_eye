@@ -42,6 +42,10 @@ export function CameraSource() {
     grab() {
       if (video.readyState < 2) return null;
       return grabFrom(video, video.videoWidth, video.videoHeight, cap);
+    },
+    display() {
+      if (video.readyState < 2) return null;
+      return { el: video, w: video.videoWidth, h: video.videoHeight };
     }
   };
 }
@@ -64,6 +68,10 @@ export function TestSource(url) {
     grab() {
       if (!ready) return null;
       return grabFrom(img, img.naturalWidth, img.naturalHeight, cap);
+    },
+    display() {
+      if (!ready) return null;
+      return { el: img, w: img.naturalWidth, h: img.naturalHeight };
     }
   };
 }

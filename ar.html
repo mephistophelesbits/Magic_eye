@@ -33,6 +33,8 @@
 import { CameraSource, TestSource } from "./camera.js";
 import { OverlayRenderer } from "./overlay.js";
 
+var TEST_IMAGE = "samples/shark-textured.png";
+
 var canvas = document.getElementById("view");
 var overlay = OverlayRenderer(canvas);
 var worker = new Worker("./worker.js", { type: "module" });
@@ -54,7 +56,7 @@ worker.onmessage = function (e) {
   if (m.depth) last = { depth: new Float32Array(m.depth), dw: m.dw, dh: m.dh };
   else last = { depth: null, dw: 0, dh: 0 };
   document.getElementById("searching").classList.toggle("on", !m.depth);
-  var conf = m.confidence == null ? "—" : m.confidence.toFixed(2);
+  var conf = m.confidence.toFixed(2);
   document.getElementById("readout").textContent =
     "src: " + (usingTest ? "test" : "camera") +
     "\nperiod: " + m.period + "px  conf: " + conf +
@@ -63,18 +65,21 @@ worker.onmessage = function (e) {
 
 function loop() {
   if (!running) return;
-  var frame = source && source.grab();
-  if (frame) {
-    overlay.draw(frame, last.depth, last.dw, last.dh);
+  var disp = source && source.display();
+  if (disp) {
+    overlay.draw(disp, last.depth, last.dw, last.dh);
     if (!decodeInFlight) {
-      decodeInFlight = true;
-      decodeCount++;
-      var copy = new Uint8ClampedArray(frame.data); // transfer a copy, keep our frame
-      worker.postMessage(
-        { buffer: copy.buffer, w: frame.width, h: frame.height,
-          frameId: ++frameId, redetect: decodeCount % REDETECT_EVERY === 1 },
-        [copy.buffer]
-      );
+      var frame = source.grab();
+      if (frame) {
+        decodeInFlight = true;
+        decodeCount++;
+        var copy = new Uint8ClampedArray(frame.data); // transfer a copy, keep our frame
+        worker.postMessage(
+          { buffer: copy.buffer, w: frame.width, h: frame.height,
+            frameId: ++frameId, redetect: decodeCount % REDETECT_EVERY === 1 },
+          [copy.buffer]
+        );
+      }
     }
   }
   requestAnimationFrame(loop);
@@ -92,17 +97,17 @@ async function startWith(src, isTest) {
   } catch (err) {
     document.getElementById("readout").textContent = "camera error:\n" + (err && err.message || err) +
       "\n(falling back to test image)";
-    if (!isTest) startWith(TestSource("Demo/rkspFQ9.jpeg"), true);
+    if (!isTest) startWith(TestSource(TEST_IMAGE), true);
   }
 }
 
 document.getElementById("start").onclick = function () {
-  startWith(usingTest ? TestSource("Demo/rkspFQ9.jpeg") : CameraSource(), usingTest);
+  startWith(usingTest ? TestSource(TEST_IMAGE) : CameraSource(), usingTest);
 };
 document.getElementById("mode").onclick = function () {
   usingTest = !usingTest;
   this.textContent = usingTest ? "Use camera" : "Use test image";
-  startWith(usingTest ? TestSource("Demo/rkspFQ9.jpeg") : CameraSource(), usingTest);
+  startWith(usingTest ? TestSource(TEST_IMAGE) : CameraSource(), usingTest);
 };
 document.getElementById("opacity").oninput = function (e) { overlay.setOpacity(+e.target.value); };
 

@@ -1,9 +1,11 @@
 "use strict";
 import { colorizeRelief } from "./decoder.js";
 
-// Owns the visible canvas. draw(frame, depth) paints the camera frame, then the
-// colorized depth on top at `opacity`. The depth map may be smaller than the
-// frame (decoder trims sMax columns); it is stretched to cover the frame.
+// Owns the visible canvas. draw(display, depth) paints the full-resolution
+// display source (video/img element), then the colorized depth on top at
+// `opacity`. The depth map may be smaller than the display source (decoder
+// trims sMax columns and works off a downscaled decode frame); it is
+// stretched to cover the canvas.
 export function OverlayRenderer(canvas) {
   var ctx = canvas.getContext("2d");
   var depthCanvas = document.createElement("canvas");
@@ -12,10 +14,12 @@ export function OverlayRenderer(canvas) {
 
   return {
     setOpacity(v) { opacity = v; },
-    draw(frame, depth, dw, dh) {
-      if (canvas.width !== frame.width) canvas.width = frame.width;
-      if (canvas.height !== frame.height) canvas.height = frame.height;
-      ctx.putImageData(frame, 0, 0);
+    draw(display, depth, dw, dh) {
+      var scale = Math.min(1, 1280 / display.w);
+      var cw = Math.round(display.w * scale), ch = Math.round(display.h * scale);
+      if (canvas.width !== cw) canvas.width = cw;
+      if (canvas.height !== ch) canvas.height = ch;
+      ctx.drawImage(display.el, 0, 0, cw, ch);
       if (!depth) return;
       var px = colorizeRelief(depth, dw, dh);
       if (depthCanvas.width !== dw) depthCanvas.width = dw;
