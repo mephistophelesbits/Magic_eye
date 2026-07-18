@@ -1,0 +1,116 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0E151E">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Magic Eye AR</title>
+<style>
+  html,body{margin:0;height:100%;background:#0E151E;color:#E9E5DB;font-family:system-ui,sans-serif;overflow:hidden}
+  #view{display:block;width:100vw;height:100vh;object-fit:cover}
+  .hud{position:fixed;left:0;right:0;bottom:0;padding:14px 16px calc(14px + env(safe-area-inset-bottom));
+       background:linear-gradient(transparent,rgba(0,0,0,.55));display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .hud button,.hud label{font:12px/1 "IBM Plex Mono",monospace;letter-spacing:.06em;color:#E9E5DB}
+  .hud button{background:#161F2B;border:1px solid #26323F;border-radius:3px;padding:10px 14px;text-transform:uppercase;cursor:pointer}
+  .hud button.primary{background:#E8A33D;color:#171008;border-color:#E8A33D}
+  input[type=range]{accent-color:#E8A33D;vertical-align:middle}
+  #readout{position:fixed;top:calc(10px + env(safe-area-inset-top));left:12px;font:11px/1.4 "IBM Plex Mono",monospace;color:#7D8C9C;white-space:pre}
+  #searching{position:fixed;top:50%;left:0;right:0;text-align:center;transform:translateY(-50%);color:#7D8C9C;
+             font:12px/1 "IBM Plex Mono",monospace;letter-spacing:.2em;text-transform:uppercase;display:none}
+  #searching.on{display:block}
+</style>
+
+<canvas id="view"></canvas>
+<div id="readout"></div>
+<div id="searching">searching for a stereogram…</div>
+<div class="hud">
+  <button id="start" class="primary">Start camera</button>
+  <button id="mode">Use test image</button>
+  <label>Overlay <input id="opacity" type="range" min="0" max="1" step="0.05" value="0.85"></label>
+</div>
+
+<script type="module">
+"use strict";
+import { CameraSource, TestSource } from "./camera.js";
+import { OverlayRenderer } from "./overlay.js";
+
+var TEST_IMAGE = "samples/shark-textured.png";
+
+var canvas = document.getElementById("view");
+var overlay = OverlayRenderer(canvas);
+var worker = new Worker("./worker.js", { type: "module" });
+worker.onerror = function (err) {
+  decodeInFlight = false;
+  document.getElementById("readout").textContent = "decode worker error:\n" + (err && err.message || err);
+};
+
+var source = null, usingTest = false, running = false;
+var frameId = 0, decodeInFlight = false, decodeCount = 0;
+var last = { depth: null, dw: 0, dh: 0 };
+
+// Throttle decode requests; re-run period detection every REDETECT_EVERY decodes.
+var REDETECT_EVERY = 5;
+
+worker.onmessage = function (e) {
+  var m = e.data;
+  decodeInFlight = false;
+  if (m.depth) last = { depth: new Float32Array(m.depth), dw: m.dw, dh: m.dh };
+  else last = { depth: null, dw: 0, dh: 0 };
+  document.getElementById("searching").classList.toggle("on", !m.depth);
+  var conf = m.confidence.toFixed(2);
+  document.getElementById("readout").textContent =
+    "src: " + (usingTest ? "test" : "camera") +
+    "\nperiod: " + m.period + "px  conf: " + conf +
+    "\ndecodes: " + decodeCount;
+};
+
+function loop() {
+  if (!running) return;
+  var disp = source && source.display();
+  if (disp) {
+    overlay.draw(disp, last.depth, last.dw, last.dh);
+    if (!decodeInFlight) {
+      var frame = source.grab();
+      if (frame) {
+        decodeInFlight = true;
+        decodeCount++;
+        var copy = new Uint8ClampedArray(frame.data); // transfer a copy, keep our frame
+        worker.postMessage(
+          { buffer: copy.buffer, w: frame.width, h: frame.height,
+            frameId: ++frameId, redetect: decodeCount % REDETECT_EVERY === 1 },
+          [copy.buffer]
+        );
+      }
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+async function startWith(src, isTest) {
+  if (source) source.stop();
+  running = false;
+  source = src; usingTest = isTest;
+  last = { depth: null, dw: 0, dh: 0 };
+  try {
+    await source.start();
+    running = true;
+    requestAnimationFrame(loop);
+  } catch (err) {
+    document.getElementById("readout").textContent = "camera error:\n" + (err && err.message || err) +
+      "\n(falling back to test image)";
+    if (!isTest) startWith(TestSource(TEST_IMAGE), true);
+  }
+}
+
+document.getElementById("start").onclick = function () {
+  startWith(usingTest ? TestSource(TEST_IMAGE) : CameraSource(), usingTest);
+};
+document.getElementById("mode").onclick = function () {
+  usingTest = !usingTest;
+  this.textContent = usingTest ? "Use camera" : "Use test image";
+  startWith(usingTest ? TestSource(TEST_IMAGE) : CameraSource(), usingTest);
+};
+document.getElementById("opacity").oninput = function (e) { overlay.setOpacity(+e.target.value); };
+
+// Optional service worker for home-screen install; ignore failures in dev.
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(function () {});
+</script>

@@ -164,12 +164,12 @@
   </div>
 </div>
 
-<script>
+<script type="module">
 "use strict";
+import { clamp, boxH, boxV, median3, polish, detectPeriod, decodeDepth } from "./decoder.js";
 
 var SRC=null, DEPTH=null, SHIFT=null, DW=0, DH=0, PERIOD=100, MODE="relief", COLORSRC=true, busy=false;
 var $=function(id){return document.getElementById(id);};
-var clamp=function(v,a,b){return v<a?a:v>b?b:v;};
 
 // Nothing fails silently: every error lands here, in view.
 function say(msg, sub, isErr, frac){
@@ -275,157 +275,12 @@ Array.prototype.forEach.call(document.querySelectorAll("button.samplecard"), fun
 });
 
 // ---------------------------------------------------------------- decode
-function estimatePeriod(d, w, h){
-  var lo = 20, hi = Math.min(320, Math.floor(w / 2.6));
-  if (hi <= lo) return lo;
-  var cost = new Float64Array(hi + 1);
-  for (var s = lo; s <= hi; s++){
-    var sum = 0, n = 0;
-    for (var y = 0; y < h; y += 2){
-      var row = y * w * 4;
-      for (var x = 0; x + s < w; x += 2){
-        var a = row + x*4, b = a + s*4;
-        sum += Math.abs(d[a]-d[b]) + Math.abs(d[a+1]-d[b+1]) + Math.abs(d[a+2]-d[b+2]);
-        n++;
-      }
-    }
-    cost[s] = n ? sum/n : 1e9;
-  }
-  var best = lo;
-  for (var s2 = lo; s2 <= hi; s2++) if (cost[s2] < cost[best]) best = s2;
-
-  // Multiples of the true period match well too, so walk down to the smallest
-  // shift that is both nearly as good AND a genuinely sharp dip, not just noise.
-  var sorted = Array.prototype.slice.call(cost, lo, hi + 1).sort(function(p,q){return p-q;});
-  var baseline = sorted[Math.floor(sorted.length * 0.5)];
-  var thr = Math.min(cost[best] * 1.25, baseline * 0.80);
-  for (var s3 = lo + 1; s3 < best; s3++){
-    if (cost[s3] < thr && cost[s3] <= cost[s3-1] && cost[s3] <= cost[s3+1]) { best = s3; break; }
-  }
-  return best;
-}
-
-function boxH(buf, w, h, r){
-  var out = new Float32Array(w*h), inv = 1/(2*r+1);
-  for (var y = 0; y < h; y++){
-    var row = y*w, sum = 0;
-    for (var x = -r; x <= r; x++) sum += buf[row + clamp(x,0,w-1)];
-    for (var x2 = 0; x2 < w; x2++){
-      out[row+x2] = sum * inv;
-      sum += buf[row + clamp(x2+r+1,0,w-1)] - buf[row + clamp(x2-r,0,w-1)];
-    }
-  }
-  return out;
-}
-function boxV(buf, w, h, r){
-  var out = new Float32Array(w*h), inv = 1/(2*r+1);
-  for (var x = 0; x < w; x++){
-    var sum = 0;
-    for (var y = -r; y <= r; y++) sum += buf[clamp(y,0,h-1)*w + x];
-    for (var y2 = 0; y2 < h; y2++){
-      out[y2*w+x] = sum * inv;
-      sum += buf[clamp(y2+r+1,0,h-1)*w + x] - buf[clamp(y2-r,0,h-1)*w + x];
-    }
-  }
-  return out;
-}
-
 function decode(period, done){
-  var d = SRC.data, w = SRC.w, h = SRC.h;
-  var sMin = Math.max(8, Math.round(period * 0.70));
-  var sMax = Math.max(sMin + 2, Math.round(period * 1.05));
-  var dw = w - sMax;
-  if (dw < 40){ say("Period " + period + " px is too wide for this image", "Lower the period slider.", true, 1); busy = false; return; }
-
-  var bestCost = new Float32Array(dw*h);
-  for (var i = 0; i < dw*h; i++) bestCost[i] = Infinity;
-  var bestS = new Int16Array(dw*h);
-  var raw = new Float32Array(dw*h);
-  // costs one shift below/above the winner, for sub-pixel refinement
-  var cLo = new Float32Array(dw*h), cHi = new Float32Array(dw*h), prevAgg = null;
-  for (var i2i = 0; i2i < dw*h; i2i++){ cLo[i2i] = Infinity; cHi[i2i] = Infinity; }
-  var total = sMax - sMin + 1, s = sMin, k = 0;
-
-  function step(){
-    var chunkEnd = Math.min(s + 3, sMax);
-    for (; s <= chunkEnd; s++, k++){
-      for (var y = 0; y < h; y++){
-        var rs = y*w*4, rd = y*dw;
-        for (var x = 0; x < dw; x++){
-          var a = rs + x*4, b = a + s*4;
-          raw[rd+x] = Math.abs(d[a]-d[b]) + Math.abs(d[a+1]-d[b+1]) + Math.abs(d[a+2]-d[b+2]);
-        }
-      }
-      var agg = boxV(boxH(raw, dw, h, 4), dw, h, 3);   // single pixels are ambiguous in noise
-      for (var j = 0; j < dw*h; j++){
-        var aj = agg[j];
-        if (aj < bestCost[j]){
-          bestCost[j] = aj; bestS[j] = s;
-          cLo[j] = prevAgg ? prevAgg[j] : Infinity;
-          cHi[j] = Infinity;
-        } else if (bestS[j] === s - 1){
-          cHi[j] = aj;      // first plane after the winner
-        }
-      }
-      prevAgg = agg;
-    }
-    say("Measuring pattern spacing", "", false, 0.15 + 0.8 * (k/total));
-    if (s <= sMax) { setTimeout(step, 0); return; }
-
-    // Sub-pixel disparity: fit a parabola through the cost at s-1, s, s+1 and
-    // take its vertex. Whole-pixel shifts quantize depth into visible terraces;
-    // this recovers the smooth gradients the poster actually encodes.
-    var depth = new Float32Array(dw*h);
-    var span = Math.max(1, period - sMin);
-    for (var m = 0; m < dw*h; m++){
-      var c0 = bestCost[m], cm = cLo[m], cp = cHi[m], dlt = 0;
-      if (cm < Infinity && cp < Infinity){
-        var den = cm - 2*c0 + cp;
-        if (den > 1e-6) dlt = clamp(0.5*(cm - cp)/den, -0.5, 0.5);
-      }
-      depth[m] = clamp((period - (bestS[m] + dlt)) / span, 0, 1);
-    }
-
-    // Posters rarely use the whole theoretical disparity range — stretch to the
-    // band this image actually occupies so the shape has contrast. Percentiles are
-    // taken on a median-filtered copy: lone mismatch speckles must not set the range.
-    var n = dw*h, histo = new Int32Array(257), acc = 0, lo = -1, hi = 1;
-    var clean = median3(depth, dw, h);
-    for (var m2 = 0; m2 < n; m2++) histo[(clean[m2]*256)|0]++;
-    for (var bb = 0; bb <= 256; bb++){
-      acc += histo[bb];
-      if (lo < 0 && acc >= n*0.01) lo = bb/256;
-      if (acc >= n*0.99){ hi = (bb+1)/256; break; }
-    }
-    if (hi - lo > 0.04){
-      var inv = 1/(hi - lo);
-      for (var m3 = 0; m3 < n; m3++) depth[m3] = clamp((depth[m3] - lo)*inv, 0, 1);
-    }
-    DEPTH = depth; SHIFT = bestS; DW = dw; DH = h;
-    done();
-  }
-  setTimeout(step, 0);
-}
-
-// ---------------------------------------------------------------- cleanup
-function median3(src, w, h){
-  var out = new Float32Array(w*h), v = new Array(9);
-  for (var y = 0; y < h; y++){
-    for (var x = 0; x < w; x++){
-      var n = 0;
-      for (var dy = -1; dy <= 1; dy++)
-        for (var dx = -1; dx <= 1; dx++)
-          v[n++] = src[clamp(y+dy,0,h-1)*w + clamp(x+dx,0,w-1)];
-      v.sort(function(p,q){return p-q;});
-      out[y*w+x] = v[4];
-    }
-  }
-  return out;
-}
-function polish(depth, w, h, passes){
-  var d = median3(depth, w, h);
-  for (var i = 0; i < passes; i++) d = boxV(boxH(d, w, h, 2), w, h, 2);
-  return d;
+  say("Measuring pattern spacing", "", false, 0.4);
+  var res = decodeDepth(SRC.data, SRC.w, SRC.h, period);
+  if (!res){ say("Period " + period + " px is too wide for this image", "Lower the period slider.", true, 1); busy = false; return; }
+  DEPTH = res.depth; SHIFT = res.shift; DW = res.dw; DH = res.dh;
+  done();
 }
 
 // ---------------------------------------------------------------- render
@@ -771,7 +626,7 @@ function run(autoPeriod){
   setTimeout(function(){
     try {
       if (autoPeriod){
-        PERIOD = estimatePeriod(SRC.data, SRC.w, SRC.h);
+        PERIOD = detectPeriod(SRC.data, SRC.w, SRC.h).period;
         var sl = $("period");
         sl.max = Math.max(40, Math.min(320, Math.floor(SRC.w / 2.6)));
         sl.value = PERIOD;
