@@ -53,21 +53,20 @@ The bundled sample stereograms in `samples/` come from Wikimedia Commons and kee
 
 The generator used for the test image is the classic algorithm from Thimbleby, Inglis and Witten, *Displaying 3D Images: Algorithms for Single Image Random Dot Stereograms* (IEEE Computer, 1994). Recovering shape from a finished autostereogram has been studied properly by Ron Kimmel in *3D Shape Reconstruction from Autostereograms and Stereo* (Journal of Visual Communication and Image Representation, 2002); this implementation is a plain winner-take-all version of the same idea.
 
-## Live AR overlay
+## The decoder core
 
-`ar.html` is a second, camera-driven entry point: point your phone at a Magic Eye poster and it decodes depth live, frame by frame, and draws a relief overlay right over the video feed — no free-fusing required. It shares the same decoder core as `index.html`, downscaled and run in a Web Worker so the main thread stays smooth, with a period-detection gate that suppresses the overlay when the camera isn't looking at a stereogram.
+The decode pipeline lives in `decoder.js` as a pure, DOM-free module: period detection
+(with a confidence score), the sub-pixel depth decode, the box blurs and median filter,
+and a relief colorizer. `index.html` imports it, so the maths has one home and can be
+tested on its own.
 
-It's also a minimal installable PWA (`manifest.webmanifest` + `sw.js`), so it can be added to a phone's home screen and opened like a native app.
+`npm test` runs its unit tests (Node ≥ 18, no dependencies).
 
-**iOS requires HTTPS for camera access.** `localhost`/the preview server only work with the built-in test image (no real camera). To test on an iPhone, deploy to the existing Vercel project and open the deployed `/ar.html` URL on the phone — `getUserMedia` needs a secure context there.
+## Live camera version
 
-To test on-device:
-1. Open the deployed URL (e.g. `https://magic-eye-steel.vercel.app/ar.html`) on the phone.
-2. Tap **Start camera** and grant camera permission.
-3. Point the camera at a Magic Eye image shown on a monitor or in print.
-4. Use the overlay slider to fade between the raw video and the decoded relief.
-
-`npm test` runs the decoder's unit tests (Node ≥ 18, no dependencies) — the same pure core both entry points rely on.
+There's a companion project, **Magic Eye AR**, that points a phone camera at a Magic Eye
+and decodes it live, painting the revealed depth straight onto the video feed. It shares
+this `decoder.js` core, run downscaled in a Web Worker to keep up with the frame rate.
 
 ## Licence
 
